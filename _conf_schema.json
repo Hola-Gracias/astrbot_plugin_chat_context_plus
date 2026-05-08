@@ -89,5 +89,11 @@
         "default": 0.0
       }
     }
+  },
+  "debug_logging": {
+    "type": "bool",
+    "description": "调试日志",
+    "hint": "开启后会输出完整历史注入格式及后续调试信息，日志级别为 debug",
+    "default": false
   }
 }

@@ -153,6 +153,7 @@ class ChatContextPlusPlugin(Star):
         self.enable_tool_history = False
         self.tool_args_max_chars = 500
         self.tool_result_max_chars = 1000
+        self.debug_logging = False
         self.injection_mode = "extra_user_content_parts"
 
     async def initialize(self) -> None:
@@ -172,6 +173,7 @@ class ChatContextPlusPlugin(Star):
         self.enable_tool_history = gc.get("enable_tool_history", False)
         self.tool_args_max_chars = gc.get("tool_args_max_chars", 500)
         self.tool_result_max_chars = gc.get("tool_result_max_chars", 1000)
+        self.debug_logging = self.config.get("debug_logging", False)
         self.injection_mode = compat.get("injection_mode", "extra_user_content_parts")
 
         # 存储
@@ -322,6 +324,7 @@ class ChatContextPlusPlugin(Star):
             session_id=session_id,
             bot_id=bot_id,
             injection_mode=self.injection_mode,
+            debug_logging=self.debug_logging,
         )
 
     # ─── 工具调用 hooks ───
@@ -529,7 +532,7 @@ class ChatContextPlusPlugin(Star):
     # ─── 插件指令 ───
 
     @filter.command("ccp")
-    async def ccp_command(self, event: AstrMessageEvent, sub: str = "", *args):
+    async def ccp_command(self, event: AstrMessageEvent, sub: str = ""):
         """群聊上下文增强插件指令。
 
         用法：
@@ -579,7 +582,8 @@ class ChatContextPlusPlugin(Star):
             f"  工具事件: {tool_count}\n"
             f"  存储上限: {self.store_max_events}\n"
             f"  注入消息数: {self.inject_message_count}\n"
-            f"  工具历史: {'开启' if self.enable_tool_history else '关闭'}"
+            f"  工具历史: {'开启' if self.enable_tool_history else '关闭'}\n"
+            f"  调试日志: {'开启' if self.debug_logging else '关闭'}"
         )
 
     async def _cmd_clear(self, event: AstrMessageEvent) -> str:

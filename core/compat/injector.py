@@ -44,6 +44,7 @@ async def inject_history(
     session_id: str = "",
     bot_id: str = "",
     injection_mode: str = "extra_user_content_parts",
+    debug_logging: bool = False,
 ) -> None:
     """向 LLM 请求注入群聊历史上下文。
 
@@ -58,6 +59,7 @@ async def inject_history(
         session_id: 群号 / 会话 ID。
         bot_id: 机器人自身 ID。
         injection_mode: 注入位置，"extra_user_content_parts" 或 "system_prompt_append"。
+        debug_logging: 是否输出 debug 级调试日志。
     """
     # 1. 必须清空 contexts，由插件 history 接管
     req.contexts = []
@@ -92,6 +94,12 @@ async def inject_history(
 
     if not combined.strip():
         return
+
+    if debug_logging:
+        logger.debug(
+            "[ChatContextPlus] 即将注入群聊历史上下文 "
+            f"session={session_id} mode={injection_mode}\n{combined}"
+        )
 
     # 5. 根据 injection_mode 选择注入位置，system_prompt_append 作为 fallback
     if injection_mode == "system_prompt_append":

@@ -79,7 +79,9 @@ class RuleTrigger:
             return True
 
         # 4. 触发关键词 → 触发
-        if self._check_keywords(message_text):
+        matched_keyword = self._find_keyword(message_text)
+        if matched_keyword:
+            logger.debug(f"[ChatContextPlus] 存在关键词[{matched_keyword}]，触发回复")
             return True
 
         # 5. 主动回复概率 → 触发
@@ -138,12 +140,15 @@ class RuleTrigger:
                     return True
         return False
 
-    def _check_keywords(self, text: str) -> bool:
-        """检查是否命中触发关键词。"""
+    def _find_keyword(self, text: str) -> str | None:
+        """查找命中的触发关键词。"""
         if not self.trigger_keywords or not text:
-            return False
+            return None
         text_lower = text.lower()
-        return any(kw.lower() in text_lower for kw in self.trigger_keywords if kw)
+        for kw in self.trigger_keywords:
+            if kw and kw.lower() in text_lower:
+                return kw
+        return None
 
     def _check_probability(self) -> bool:
         """根据概率判断是否主动回复。"""

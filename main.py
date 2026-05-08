@@ -147,6 +147,13 @@ class ChatContextPlusPlugin(Star):
         self.config = config
         self.store: JsonStore | None = None
         self.trigger: RuleTrigger | None = None
+        self.enabled = True
+        self.store_max_events = 100
+        self.inject_message_count = 30
+        self.enable_tool_history = False
+        self.tool_args_max_chars = 500
+        self.tool_result_max_chars = 1000
+        self.injection_mode = "extra_user_content_parts"
 
     async def initialize(self) -> None:
         """插件初始化：读取配置、创建存储和触发器。"""
@@ -157,16 +164,26 @@ class ChatContextPlusPlugin(Star):
         """从配置中加载参数，初始化 store 和 trigger。"""
         gc = self.config.get("group_context", {})
         rp = self.config.get("reply", {})
+        compat = self.config.get("compatibility", {})
+
+        self.enabled = gc.get("enabled", True)
+        self.store_max_events = gc.get("store_max_events", 100)
+        self.inject_message_count = gc.get("inject_message_count", 30)
+        self.enable_tool_history = gc.get("enable_tool_history", False)
+        self.tool_args_max_chars = gc.get("tool_args_max_chars", 500)
+        self.tool_result_max_chars = gc.get("tool_result_max_chars", 1000)
+        self.injection_mode = compat.get("injection_mode", "extra_user_content_parts")
 
         # 存储
         data_dir = get_plugin_data_dir()
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        store_max = gc.get("store_max_events", 100)
         if self.store is None:
-            self.store = JsonStore(base_dir=data_dir, store_max_events=store_max)
+            self.store = JsonStore(
+                base_dir=data_dir, store_max_events=self.store_max_events
+            )
         else:
-            self.store.store_max_events = store_max
+            self.store.store_max_events = self.store_max_events
 
         # 触发器
         trigger_kwargs = {
@@ -181,12 +198,8 @@ class ChatContextPlusPlugin(Star):
         else:
             self.trigger.update_config(**trigger_kwargs)
 
-    def _get_gc_config(self) -> dict[str, Any]:
-        """获取 group_context 配置。"""
-        return self.config.get("group_context", {})
-
     def _is_enabled(self) -> bool:
-        return self._get_gc_config().get("enabled", True)
+        return self.enabled
 
     async def _get_current_conversation(self, event: AstrMessageEvent) -> Any | None:
         """获取或创建当前 AstrBot 会话，用于保留本体人格选择。"""
@@ -218,9 +231,6 @@ class ChatContextPlusPlugin(Star):
         if _is_ccp_command(event):
             event.set_extra("ccp_command", True)
             return
-
-        # 重新读取配置（支持运行时修改）
-        self._load_config()
 
         # 构造 message event
         outline, content, message_str, components = _extract_content(event)
@@ -292,8 +302,6 @@ class ChatContextPlusPlugin(Star):
         if not event.get_extra("ccp_triggered"):
             return
 
-        gc = self._get_gc_config()
-        compat = self.config.get("compatibility", {})
         exclude_id = event.get_extra("ccp_event_id")
 
         # 读取事件列表
@@ -306,14 +314,14 @@ class ChatContextPlusPlugin(Star):
         await inject_history(
             req=req,
             events=events,
-            inject_message_count=gc.get("inject_message_count", 30),
+            inject_message_count=self.inject_message_count,
             exclude_event_id=exclude_id,
-            enable_tool_history=gc.get("enable_tool_history", False),
-            tool_args_max_chars=gc.get("tool_args_max_chars", 500),
-            tool_result_max_chars=gc.get("tool_result_max_chars", 1000),
+            enable_tool_history=self.enable_tool_history,
+            tool_args_max_chars=self.tool_args_max_chars,
+            tool_result_max_chars=self.tool_result_max_chars,
             session_id=session_id,
             bot_id=bot_id,
-            injection_mode=compat.get("injection_mode", "extra_user_content_parts"),
+            injection_mode=self.injection_mode,
         )
 
     # ─── 工具调用 hooks ───
@@ -323,8 +331,7 @@ class ChatContextPlusPlugin(Star):
         self, event: AstrMessageEvent, tool, tool_args: dict | None
     ) -> None:
         """工具开始 hook：记录 tool event（状态 running）。"""
-        gc = self._get_gc_config()
-        if not gc.get("enable_tool_history", False):
+        if not self.enable_tool_history:
             return
         if self.store is None:
             return
@@ -344,9 +351,10 @@ class ChatContextPlusPlugin(Star):
                 import json
 
                 args_str = json.dumps(tool_args, ensure_ascii=False)
-                max_chars = gc.get("tool_args_max_chars", 500)
-                if len(args_str) > max_chars:
-                    truncated_args = {"_truncated": truncate_text(args_str, max_chars)}
+                if len(args_str) > self.tool_args_max_chars:
+                    truncated_args = {
+                        "_truncated": truncate_text(args_str, self.tool_args_max_chars)
+                    }
                 else:
                     truncated_args = tool_args
             except Exception:
@@ -371,8 +379,7 @@ class ChatContextPlusPlugin(Star):
         self, event: AstrMessageEvent, tool, tool_args: dict | None, tool_result
     ) -> None:
         """工具结束 hook：更新 tool event 状态和结果。"""
-        gc = self._get_gc_config()
-        if not gc.get("enable_tool_history", False):
+        if not self.enable_tool_history:
             return
         if self.store is None:
             return
@@ -399,8 +406,7 @@ class ChatContextPlusPlugin(Star):
             except Exception:
                 result_text = str(tool_result)
 
-        max_chars = gc.get("tool_result_max_chars", 1000)
-        result_text = truncate_text(result_text, max_chars)
+        result_text = truncate_text(result_text, self.tool_result_max_chars)
 
         # 判断状态
         status = "success"
@@ -550,8 +556,6 @@ class ChatContextPlusPlugin(Star):
 
     async def _cmd_status(self, event: AstrMessageEvent) -> str:
         umo = event.unified_msg_origin
-        gc = self._get_gc_config()
-        enabled = gc.get("enabled", True)
 
         if self.store is None:
             return "插件存储未初始化。"
@@ -568,14 +572,14 @@ class ChatContextPlusPlugin(Star):
 
         return (
             f"ChatContextPlus 状态\n"
-            f"  启用: {'是' if enabled else '否'}\n"
+            f"  启用: {'是' if self.enabled else '否'}\n"
             f"  当前群聊: {umo}\n"
             f"  总事件数: {count}\n"
             f"  消息事件: {msg_count}\n"
             f"  工具事件: {tool_count}\n"
-            f"  存储上限: {gc.get('store_max_events', 100)}\n"
-            f"  注入消息数: {gc.get('inject_message_count', 30)}\n"
-            f"  工具历史: {'开启' if gc.get('enable_tool_history', False) else '关闭'}"
+            f"  存储上限: {self.store_max_events}\n"
+            f"  注入消息数: {self.inject_message_count}\n"
+            f"  工具历史: {'开启' if self.enable_tool_history else '关闭'}"
         )
 
     async def _cmd_clear(self, event: AstrMessageEvent) -> str:

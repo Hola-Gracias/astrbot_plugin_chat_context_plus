@@ -1,0 +1,93 @@
+{
+  "group_context": {
+    "type": "object",
+    "description": "群聊上下文增强",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用群聊上下文增强",
+        "hint": "开启后插件将接管群聊历史上下文的记录与注入",
+        "default": true
+      },
+      "store_max_events": {
+        "type": "int",
+        "description": "本地最多保存事件数",
+        "hint": "每个群聊 JSON 文件中最多保留的 event 数量，含消息和工具事件",
+        "default": 100
+      },
+      "inject_message_count": {
+        "type": "int",
+        "description": "注入消息数量",
+        "hint": "输入给大模型的最近聊天消息数量，仅计 message 类型，tool 事件不占用此计数",
+        "default": 30
+      },
+      "enable_tool_history": {
+        "type": "bool",
+        "description": "启用工具历史记录",
+        "hint": "开启后将在 <history> 中插入工具调用标记，并生成 <tool_history>",
+        "default": false
+      },
+      "tool_args_max_chars": {
+        "type": "int",
+        "description": "工具参数最大字符数",
+        "default": 500
+      },
+      "tool_result_max_chars": {
+        "type": "int",
+        "description": "工具结果最大字符数",
+        "default": 1000
+      }
+    }
+  },
+  "compatibility": {
+    "type": "object",
+    "description": "兼容性设置",
+    "items": {
+      "injection_mode": {
+        "type": "string",
+        "description": "历史注入位置",
+        "hint": "extra_user_content_parts：使用临时用户附加上下文，推荐；system_prompt_append：追加到 system prompt 末尾。extra_user_content_parts 失败时会自动回退到 system_prompt_append。",
+        "default": "extra_user_content_parts",
+        "options": ["extra_user_content_parts", "system_prompt_append"]
+      }
+    }
+  },
+  "reply": {
+    "type": "object",
+    "description": "回复触发",
+    "items": {
+      "trigger_on_at": {
+        "type": "bool",
+        "description": "被 @ 时触发",
+        "default": true
+      },
+      "trigger_on_reply": {
+        "type": "bool",
+        "description": "回复 Bot 消息时触发",
+        "default": true
+      },
+      "trigger_keywords": {
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "description": "触发关键词列表",
+        "default": []
+      },
+      "blacklist_keywords": {
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "description": "黑名单关键词列表",
+        "default": []
+      },
+      "active_reply_probability": {
+        "type": "float",
+        "description": "主动回复概率",
+        "hint": "0.0 ~ 1.0",
+        "default": 0.0
+      }
+    }
+  }
+}

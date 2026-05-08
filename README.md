@@ -104,4 +104,4 @@ data/plugin_data/astrbot_plugin_chat_context_plus/
 
 ## 许可证
 
-MIT License
+MIT License(LICENSE)

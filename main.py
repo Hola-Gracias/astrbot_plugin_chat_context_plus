@@ -138,6 +138,32 @@ def _extract_components_summary(event: AstrMessageEvent) -> list[dict]:
     return summary
 
 
+def _is_empty_mention(event: AstrMessageEvent) -> bool:
+    """Return True only when the message is just an @ mention to this bot."""
+    try:
+        chain = event.get_messages() or []
+    except Exception:
+        try:
+            chain = event.message_obj.message or []
+        except Exception:
+            return False
+
+    meaningful: list[Any] = []
+    for comp in chain:
+        if isinstance(comp, Comp.Plain):
+            if comp.text.strip():
+                return False
+            continue
+        meaningful.append(comp)
+
+    if len(meaningful) != 1 or not isinstance(meaningful[0], Comp.At):
+        return False
+
+    at = meaningful[0]
+    target = getattr(at, "user_id", None) or getattr(at, "qq", None)
+    return target is not None and str(target) == str(event.get_self_id())
+
+
 # ─── 插件主类 ───
 
 
@@ -403,8 +429,8 @@ class ChatContextPlusPlugin(Star):
             event.is_wake = True
             event.is_at_or_wake_command = True
 
-        # 纯 @ / 空文本但规则已触发时，给核心 Agent 一个非空 ProviderRequest
-        if should_trigger and not (event.message_str or "").strip():
+        # 只有真正的纯 @ 才补空消息提示；图片等非文本消息也可能 message_str 为空。
+        if should_trigger and _is_empty_mention(event):
             conversation = await self._get_current_conversation(event)
             req = event.request_llm(
                 prompt=(
@@ -639,12 +665,7 @@ class ChatContextPlusPlugin(Star):
     async def on_llm_response(
         self, event: AstrMessageEvent, response: LLMResponse
     ) -> None:
-        """LLM 响应 hook：作为 after_message_sent 的 fallback 备份记录。
-
-        仅在 after_message_sent 未成功记录时使用。
-        通过 extra 标记避免重复记录。
-        """
-        # 预存 LLM 输出，供 after_message_sent fallback 使用
+        """LLM 响应 hook：检测 <NO_RESPONSE> 标记并清理空回复。"""
         if not self._is_enabled():
             return
 
@@ -652,12 +673,43 @@ class ChatContextPlusPlugin(Star):
         if not umo:
             return
 
-        try:
-            completion = response.completion_text or ""
-            if completion:
-                event.set_extra("ccp_llm_response_text", completion)
-        except Exception:
-            pass
+        completion = response.completion_text or ""
+
+        if "<NO_RESPONSE>" in completion:
+            response.completion_text = ""
+            event.set_extra("ccp_no_response", True)
+            if self.debug_logging:
+                logger.debug("[ChatContextPlus] 检测到 <NO_RESPONSE>，已清空 LLM 输出")
+            return
+
+        if completion.strip():
+            event.set_extra("ccp_llm_response_text", completion)
+
+    # ─── 结果装饰 hook ───
+
+    @filter.on_decorating_result()
+    async def on_decorating_result(self, event: AstrMessageEvent) -> None:
+        """在消息发送前检查 <NO_RESPONSE> 标记，阻止空回复发送。"""
+        if not self._is_enabled():
+            return
+
+        if event.get_extra("ccp_no_response"):
+            event.clear_result()
+            if self.debug_logging:
+                logger.debug("[ChatContextPlus] 已通过 extra 标记拦截空回复")
+            return
+
+        result = event.get_result()
+        if result is None or not result.is_llm_result():
+            return
+
+        text = "".join(
+            getattr(c, "text", "") for c in (result.chain or [])
+        )
+        if "<NO_RESPONSE>" in text:
+            event.clear_result()
+            if self.debug_logging:
+                logger.debug("[ChatContextPlus] 已通过 chain 文本拦截空回复")
 
     # ─── 插件指令 ───
 

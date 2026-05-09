@@ -141,6 +141,7 @@ def render_history(
     lines.append(
         f'在这段聊天记录中，你的昵称被 "AstrBot" 替代了，你的 id 为 {bot_id}。'
     )
+    lines.append("如果你不想回复或规则不允许回复，请输出 `<NO_RESPONSE>`")
     lines.append("")
 
     for date_str, group in date_groups:

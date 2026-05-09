@@ -271,8 +271,8 @@ class ChatContextPlusPlugin(Star):
             conversation = await self._get_current_conversation(event)
             req = event.request_llm(
                 prompt=(
-                    "用户在群聊中触发了你，但没有输入文字。"
-                    "请结合最近群聊上下文自然回应；如果上下文不足，简短询问对方有什么事。"
+                    "用户在群聊中 @ 了你，但没有输入文字。"
+                    "请先结合最近群聊历史自然回应；如果上下文不足再简短询问对方有什么事。"
                     "不要提到这是一条系统补全文本。"
                 ),
                 conversation=conversation,

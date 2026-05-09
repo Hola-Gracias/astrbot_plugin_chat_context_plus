@@ -25,6 +25,8 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star
+from astrbot.core.platform.message_session import MessageSession
+from astrbot.core.platform.message_type import MessageType
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core.compat.injector import inject_history
@@ -202,6 +204,141 @@ class ChatContextPlusPlugin(Star):
 
     def _is_enabled(self) -> bool:
         return self.enabled
+
+    def _resolve_send_message_target_umo(
+        self, event: AstrMessageEvent, tool_args: dict | None
+    ) -> str | None:
+        """Resolve send_message_to_user target session to UMO if it is a group."""
+        current_session = event.unified_msg_origin
+        session_arg = (
+            tool_args.get("session")
+            if isinstance(tool_args, dict) and tool_args.get("session")
+            else current_session
+        )
+
+        try:
+            if isinstance(session_arg, MessageSession):
+                target_session = session_arg
+            elif isinstance(session_arg, str) and ":" in session_arg:
+                target_session = MessageSession.from_str(session_arg)
+            elif isinstance(session_arg, str) and current_session:
+                current = MessageSession.from_str(current_session)
+                target_session = MessageSession(
+                    platform_name=current.platform_id,
+                    message_type=current.message_type,
+                    session_id=session_arg,
+                )
+            else:
+                return None
+        except Exception as e:
+            if self.debug_logging:
+                logger.debug(
+                    f"[ChatContextPlus] 解析 send_message_to_user 目标会话失败: {e}"
+                )
+            return None
+
+        if target_session.message_type != MessageType.GROUP_MESSAGE:
+            return None
+        return str(target_session)
+
+    def _render_send_message_content(
+        self, tool_args: dict | None
+    ) -> tuple[str, list[dict]]:
+        """Render send_message_to_user message args into stored bot history text."""
+        if not isinstance(tool_args, dict):
+            return "", []
+
+        messages = tool_args.get("messages")
+        if not isinstance(messages, list):
+            return "", []
+
+        parts: list[str] = []
+        components: list[dict] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+
+            msg_type = str(msg.get("type", "")).lower()
+            if not msg_type:
+                continue
+            components.append({"type": msg_type})
+
+            if msg_type == "plain":
+                text = str(msg.get("text", "")).strip()
+                if text:
+                    parts.append(text)
+            elif msg_type == "image":
+                parts.append("[图片]")
+            elif msg_type == "record":
+                parts.append("[语音]")
+            elif msg_type == "video":
+                parts.append("[视频]")
+            elif msg_type == "file":
+                parts.append("[文件]")
+            elif msg_type == "mention_user":
+                mention_user_id = str(msg.get("mention_user_id", "")).strip()
+                parts.append(f"[@{mention_user_id}]" if mention_user_id else "[@]")
+            else:
+                parts.append("[未知消息组件]")
+
+        return " ".join(parts), components
+
+    async def _append_bot_message(
+        self,
+        umo: str,
+        event: AstrMessageEvent,
+        content: str,
+        components: list[dict] | None = None,
+    ) -> str | None:
+        """Append a bot message event to the target UMO history."""
+        if self.store is None or not content:
+            return None
+
+        id_gen = self.store.get_id_generator(umo)
+        event_id = id_gen.next_message_id()
+        bot_id = event.get_self_id() or "astrbot"
+
+        msg_event = MessageEvent(
+            id=event_id,
+            timestamp=int(time.time()),
+            sender_id=bot_id,
+            sender_name="AstrBot",
+            role="bot",
+            content=content,
+            outline=content,
+            message_str=content,
+            components=components or [],
+        )
+
+        await self.store.append_event(umo, msg_event.to_dict())
+        return event_id
+
+    async def _record_send_message_to_user(
+        self,
+        event: AstrMessageEvent,
+        tool_args: dict | None,
+        status: str,
+        result_text: str,
+    ) -> None:
+        """Record successful send_message_to_user calls as bot group history."""
+        if status != "success" or result_text.strip().lower().startswith("error:"):
+            return
+
+        target_umo = self._resolve_send_message_target_umo(event, tool_args)
+        if not target_umo:
+            return
+
+        content, components = self._render_send_message_content(tool_args)
+        if not content:
+            return
+
+        event_id = await self._append_bot_message(
+            target_umo, event, content, components
+        )
+        if self.debug_logging and event_id:
+            logger.debug(
+                f"[ChatContextPlus] 已记录主动发送消息: {target_umo} event={event_id}"
+            )
 
     async def _get_current_conversation(self, event: AstrMessageEvent) -> Any | None:
         """获取或创建当前 AstrBot 会话，用于保留本体人格选择。"""
@@ -382,13 +519,7 @@ class ChatContextPlusPlugin(Star):
         self, event: AstrMessageEvent, tool, tool_args: dict | None, tool_result
     ) -> None:
         """工具结束 hook：更新 tool event 状态和结果。"""
-        if not self.enable_tool_history:
-            return
-        if self.store is None:
-            return
-
-        umo = event.get_extra("ccp_umo")
-        if not umo:
+        if not self._is_enabled() or self.store is None:
             return
 
         tool_name = getattr(tool, "name", "unknown_tool")
@@ -419,6 +550,21 @@ class ChatContextPlusPlugin(Star):
             and tool_result.isError
         ):
             status = "error"
+
+        if tool_name == "send_message_to_user":
+            await self._record_send_message_to_user(
+                event=event,
+                tool_args=tool_args,
+                status=status,
+                result_text=result_text,
+            )
+
+        if not self.enable_tool_history:
+            return
+
+        umo = event.get_extra("ccp_umo")
+        if not umo:
+            return
 
         pending_tool_id = event.get_extra("ccp_pending_tool_id")
         updated = False
@@ -485,23 +631,7 @@ class ChatContextPlusPlugin(Star):
         if not bot_content:
             bot_content = "[Bot 回复内容无法提取]"
 
-        id_gen = self.store.get_id_generator(umo)
-        event_id = id_gen.next_message_id()
-        bot_id = event.get_self_id()
-
-        msg_event = MessageEvent(
-            id=event_id,
-            timestamp=int(time.time()),
-            sender_id=bot_id,
-            sender_name="AstrBot",
-            role="bot",
-            content=bot_content,
-            outline=bot_content,
-            message_str=bot_content,
-            components=[],
-        )
-
-        await self.store.append_event(umo, msg_event.to_dict())
+        await self._append_bot_message(umo, event, bot_content)
 
     # ─── LLM 响应 fallback hook ───
 

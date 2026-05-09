@@ -531,6 +531,7 @@ class ChatContextPlusPlugin(Star):
 
     # ─── 插件指令 ───
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ccp")
     async def ccp_command(self, event: AstrMessageEvent, sub: str = ""):
         """群聊上下文增强插件指令。

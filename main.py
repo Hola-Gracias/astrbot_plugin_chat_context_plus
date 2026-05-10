@@ -90,13 +90,8 @@ def _extract_content(event: AstrMessageEvent) -> tuple[str, str, str, list[dict]
     return outline, content, message_str, components
 
 
-def _fallback_content(event: AstrMessageEvent) -> str:
-    """手动解析消息组件，生成占位符文本。"""
-    try:
-        chain = event.message_obj.message or []
-    except Exception:
-        return "[未知消息]"
-
+def _render_component_chain(chain: list) -> str:
+    """将消息组件链递归渲染为纯文本摘要。"""
     parts: list[str] = []
     for comp in chain:
         if isinstance(comp, Comp.Plain):
@@ -111,14 +106,82 @@ def _fallback_content(event: AstrMessageEvent) -> str:
         elif isinstance(comp, Comp.File):
             parts.append("[文件]")
         elif isinstance(comp, Comp.At):
-            target = getattr(comp, "user_id", None) or getattr(comp, "qq", None) or ""
-            parts.append(f"[@{target}]")
+            qq = getattr(comp, "qq", None) or ""
+            name = getattr(comp, "name", None) or ""
+            if str(qq).lower() == "all":
+                parts.append("[@全体成员]")
+            elif name:
+                parts.append(f"[@{name} '{qq}']")
+            else:
+                parts.append(f"[@{qq}]")
         elif isinstance(comp, Comp.Face):
             parts.append("[表情]")
+        elif isinstance(comp, Comp.Reply):
+            reply_text = (
+                getattr(comp, "message_str", "")
+                or getattr(comp, "text", "")
+                or ""
+            )
+            reply_sender = getattr(comp, "sender_nickname", "") or "未知"
+            parts.append(f"[引用 {reply_sender}: {reply_text}]")
         else:
             parts.append("[未知消息组件]")
+    return " ".join(parts) if parts else ""
 
-    return " ".join(parts) if parts else "[空消息]"
+
+def _fallback_content(event: AstrMessageEvent) -> str:
+    """手动解析消息组件，生成占位符文本。"""
+    try:
+        chain = event.message_obj.message or []
+    except Exception:
+        return "[未知消息]"
+
+    if not chain:
+        return "[空消息]"
+
+    return _render_component_chain(chain)
+
+
+def _extract_reply(event: AstrMessageEvent) -> dict | None:
+    """从事件的消息链中提取 Reply 组件信息。"""
+    try:
+        chain = event.message_obj.message or []
+    except Exception:
+        return None
+
+    for comp in chain:
+        if not isinstance(comp, Comp.Reply):
+            continue
+
+        reply_sender_id = str(
+            getattr(comp, "sender_id", "") or getattr(comp, "qq", "") or ""
+        )
+        reply_sender_name = str(getattr(comp, "sender_nickname", "") or "")
+        reply_time = int(getattr(comp, "time", 0) or 0)
+
+        reply_chain = getattr(comp, "chain", None) or []
+        if reply_chain:
+            reply_content = _render_component_chain(reply_chain)
+        else:
+            reply_content = str(
+                getattr(comp, "message_str", "")
+                or getattr(comp, "text", "")
+                or ""
+            )
+
+        if not reply_content.strip():
+            return None
+
+        reply_content = truncate_text(reply_content, 150)
+
+        return {
+            "sender_id": reply_sender_id,
+            "sender_name": reply_sender_name,
+            "time": reply_time,
+            "content": reply_content,
+        }
+
+    return None
 
 
 def _extract_components_summary(event: AstrMessageEvent) -> list[dict]:
@@ -399,6 +462,7 @@ class ChatContextPlusPlugin(Star):
 
         # 构造 message event
         outline, content, message_str, components = _extract_content(event)
+        reply = _extract_reply(event)
         id_gen = self.store.get_id_generator(umo)
         event_id = id_gen.next_message_id()
 
@@ -412,6 +476,7 @@ class ChatContextPlusPlugin(Star):
             outline=outline,
             message_str=message_str,
             components=components,
+            reply=reply,
         )
 
         # 立即写入 JSON

@@ -118,12 +118,14 @@ def _render_component_chain(chain: list) -> str:
             parts.append("[表情]")
         elif isinstance(comp, Comp.Reply):
             reply_text = (
-                getattr(comp, "message_str", "")
-                or getattr(comp, "text", "")
-                or ""
+                getattr(comp, "message_str", "") or getattr(comp, "text", "") or ""
             )
             reply_sender = getattr(comp, "sender_nickname", "") or "未知"
             parts.append(f"[引用 {reply_sender}: {reply_text}]")
+        elif getattr(comp, "type", "") in ("forward",):
+            parts.append("[转发消息]")
+        elif getattr(comp, "type", "") in ("node", "nodes"):
+            parts.append("[合并转发消息]")
         else:
             parts.append("[未知消息组件]")
     return " ".join(parts) if parts else ""
@@ -164,9 +166,7 @@ def _extract_reply(event: AstrMessageEvent) -> dict | None:
             reply_content = _render_component_chain(reply_chain)
         else:
             reply_content = str(
-                getattr(comp, "message_str", "")
-                or getattr(comp, "text", "")
-                or ""
+                getattr(comp, "message_str", "") or getattr(comp, "text", "") or ""
             )
 
         if not reply_content.strip():
@@ -768,9 +768,7 @@ class ChatContextPlusPlugin(Star):
         if result is None or not result.is_llm_result():
             return
 
-        text = "".join(
-            getattr(c, "text", "") for c in (result.chain or [])
-        )
+        text = "".join(getattr(c, "text", "") for c in (result.chain or []))
         if "<NO_RESPONSE>" in text:
             event.clear_result()
             if self.debug_logging:

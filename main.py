@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from typing import Any
 
 import astrbot.api.message_components as Comp
@@ -27,205 +26,19 @@ from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core.compat.injector import inject_history
+from .core.message.parser import (
+    extract_content,
+    extract_reply,
+    is_ccp_command,
+    is_empty_mention,
+)
 from .core.storage.json_store import JsonStore
 from .core.storage.schema import MessageEvent, ToolEvent
 from .core.trigger.rule_trigger import RuleTrigger
+from .core.utils.path import get_plugin_data_dir
 from .core.utils.truncate import truncate_text
-
-# ─── 消息内容提取辅助 ───
-
-
-def get_plugin_data_dir() -> Path:
-    """
-    获取插件数据存储目录，位于 AstrBot 数据目录下的 plugin_data/astrbot_plugin_chat_context_plus。
-    """
-    return (
-        Path(get_astrbot_data_path())
-        / "plugin_data"
-        / "astrbot_plugin_chat_context_plus"
-    )
-
-
-def _is_ccp_command(event: AstrMessageEvent) -> bool:
-    """Return True when the message is handled by this plugin's command group."""
-    try:
-        text = event.get_message_str() or ""
-    except Exception:
-        text = getattr(event, "message_str", "") or ""
-    return text.strip().lower().startswith("/ccp")
-
-
-def _extract_content(event: AstrMessageEvent) -> tuple[str, str, str, list[dict]]:
-    """从事件中提取消息内容。
-
-    Returns:
-        (outline, content, message_str, components_summary)
-    """
-    # 主路径：get_message_outline
-    outline = ""
-    try:
-        outline = event.get_message_outline() or ""
-    except Exception:
-        pass
-
-    # fallback：get_message_str
-    message_str = ""
-    try:
-        message_str = event.get_message_str() or ""
-    except Exception:
-        pass
-
-    content = outline or message_str
-
-    # 如果都为空，手动解析组件生成占位符
-    if not content:
-        content = _fallback_content(event)
-
-    # 轻量 components 摘要
-    components = _extract_components_summary(event)
-
-    return outline, content, message_str, components
-
-
-def _render_component_chain(chain: list) -> str:
-    """将消息组件链递归渲染为纯文本摘要。"""
-    parts: list[str] = []
-    for comp in chain:
-        if isinstance(comp, Comp.Plain):
-            if comp.text.strip():
-                parts.append(comp.text)
-        elif isinstance(comp, Comp.Image):
-            parts.append("[图片]")
-        elif isinstance(comp, Comp.Record):
-            parts.append("[语音]")
-        elif isinstance(comp, Comp.Video):
-            parts.append("[视频]")
-        elif isinstance(comp, Comp.File):
-            parts.append("[文件]")
-        elif isinstance(comp, Comp.At):
-            qq = getattr(comp, "qq", None) or ""
-            name = getattr(comp, "name", None) or ""
-            if str(qq).lower() == "all":
-                parts.append("[@全体成员]")
-            elif name:
-                parts.append(f"[@{name} '{qq}']")
-            else:
-                parts.append(f"[@{qq}]")
-        elif isinstance(comp, Comp.Face):
-            parts.append("[表情]")
-        elif isinstance(comp, Comp.Reply):
-            reply_text = (
-                getattr(comp, "message_str", "") or getattr(comp, "text", "") or ""
-            )
-            reply_sender = getattr(comp, "sender_nickname", "") or "未知"
-            parts.append(f"[引用 {reply_sender}: {reply_text}]")
-        elif getattr(comp, "type", "") in ("forward",):
-            parts.append("[转发消息]")
-        elif getattr(comp, "type", "") in ("node", "nodes"):
-            parts.append("[合并转发消息]")
-        else:
-            parts.append("[未知消息组件]")
-    return " ".join(parts) if parts else ""
-
-
-def _fallback_content(event: AstrMessageEvent) -> str:
-    """手动解析消息组件，生成占位符文本。"""
-    try:
-        chain = event.message_obj.message or []
-    except Exception:
-        return "[未知消息]"
-
-    if not chain:
-        return "[空消息]"
-
-    return _render_component_chain(chain)
-
-
-def _extract_reply(event: AstrMessageEvent) -> dict | None:
-    """从事件的消息链中提取 Reply 组件信息。"""
-    try:
-        chain = event.message_obj.message or []
-    except Exception:
-        return None
-
-    for comp in chain:
-        if not isinstance(comp, Comp.Reply):
-            continue
-
-        reply_sender_id = str(
-            getattr(comp, "sender_id", "") or getattr(comp, "qq", "") or ""
-        )
-        reply_sender_name = str(getattr(comp, "sender_nickname", "") or "")
-        reply_time = int(getattr(comp, "time", 0) or 0)
-
-        reply_chain = getattr(comp, "chain", None) or []
-        if reply_chain:
-            reply_content = _render_component_chain(reply_chain)
-        else:
-            reply_content = str(
-                getattr(comp, "message_str", "") or getattr(comp, "text", "") or ""
-            )
-
-        if not reply_content.strip():
-            return None
-
-        reply_content = truncate_text(reply_content, 150)
-
-        return {
-            "sender_id": reply_sender_id,
-            "sender_name": reply_sender_name,
-            "time": reply_time,
-            "content": reply_content,
-        }
-
-    return None
-
-
-def _extract_components_summary(event: AstrMessageEvent) -> list[dict]:
-    """提取轻量的消息组件摘要，为后续多模态扩展预留。"""
-    try:
-        chain = event.message_obj.message or []
-    except Exception:
-        return []
-
-    summary: list[dict] = []
-    for comp in chain:
-        comp_type = getattr(comp, "type", None)
-        if comp_type:
-            summary.append({"type": str(comp_type)})
-        else:
-            summary.append({"type": type(comp).__name__})
-    return summary
-
-
-def _is_empty_mention(event: AstrMessageEvent) -> bool:
-    """Return True only when the message is just an @ mention to this bot."""
-    try:
-        chain = event.get_messages() or []
-    except Exception:
-        try:
-            chain = event.message_obj.message or []
-        except Exception:
-            return False
-
-    meaningful: list[Any] = []
-    for comp in chain:
-        if isinstance(comp, Comp.Plain):
-            if comp.text.strip():
-                return False
-            continue
-        meaningful.append(comp)
-
-    if len(meaningful) != 1 or not isinstance(meaningful[0], Comp.At):
-        return False
-
-    at = meaningful[0]
-    target = getattr(at, "user_id", None) or getattr(at, "qq", None)
-    return target is not None and str(target) == str(event.get_self_id())
-
 
 # ─── 插件主类 ───
 
@@ -456,13 +269,13 @@ class ChatContextPlusPlugin(Star):
 
         umo = event.unified_msg_origin
 
-        if _is_ccp_command(event):
+        if is_ccp_command(event):
             event.set_extra("ccp_command", True)
             return
 
         # 构造 message event
-        outline, content, message_str, components = _extract_content(event)
-        reply = _extract_reply(event)
+        outline, content, message_str, components = extract_content(event)
+        reply = extract_reply(event)
         id_gen = self.store.get_id_generator(umo)
         event_id = id_gen.next_message_id()
 
@@ -494,15 +307,24 @@ class ChatContextPlusPlugin(Star):
             event.is_wake = True
             event.is_at_or_wake_command = True
 
-        # 只有真正的纯 @ 才补空消息提示；图片等非文本消息也可能 message_str 为空。
-        if should_trigger and _is_empty_mention(event):
+            # 插件接管 LLM 请求构建。
+            # - image_urls=[] 阻止本体在 build_main_agent 中自动提取消息图片并调用
+            #   _ensure_img_caption 转述。
+            # - conversation 确保本体能正常加载当前会话的人格 system prompt。
             conversation = await self._get_current_conversation(event)
-            req = event.request_llm(
-                prompt=(
+
+            if is_empty_mention(event):
+                prompt = (
                     "用户在群聊中 @ 了你，但没有输入文字。"
                     "请先结合最近群聊历史自然回应；如果上下文不足再简短询问对方有什么事。"
                     "不要提到这是一条系统补全文本。"
-                ),
+                )
+            else:
+                prompt = content or message_str
+
+            req = event.request_llm(
+                prompt=prompt,
+                image_urls=[],
                 conversation=conversation,
             )
             event.set_extra("provider_request", req)

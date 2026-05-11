@@ -55,3 +55,14 @@ def is_group_umo(umo: str) -> bool:
     if len(parts) >= 2:
         return parts[1].lower() == "group"
     return False
+
+
+def get_plugin_data_dir() -> Path:
+    """插件数据存储目录，位于 AstrBot 数据目录下的 plugin_data/astrbot_plugin_chat_context_plus。"""
+    from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+    return (
+        Path(get_astrbot_data_path())
+        / "plugin_data"
+        / "astrbot_plugin_chat_context_plus"
+    )

@@ -31,6 +31,7 @@ class MessageEvent:
     outline: str = ""
     message_str: str = ""
     components: list[dict[str, Any]] = field(default_factory=list)
+    raw_chain: list[dict[str, Any]] = field(default_factory=list)
     reply: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ from astrbot.api import logger
 
 from ..utils.ids import EventIdGenerator
 from ..utils.path import umo_to_relative_path
-from .schema import SCHEMA_VERSION, SessionData
+from .schema import SCHEMA_VERSION, MessageEvent, SessionData
 
 
 class JsonStore:
@@ -34,6 +35,8 @@ class JsonStore:
         self._locks: dict[str, asyncio.Lock] = {}
         # UMO -> EventIdGenerator 缓存
         self._id_generators: dict[str, EventIdGenerator] = {}
+        # UMO -> platform_type 映射（用于路径中的平台目录名）
+        self._platform_types: dict[str, str] = {}
 
     @property
     def store_max_events(self) -> int:
@@ -43,13 +46,18 @@ class JsonStore:
     def store_max_events(self, value: int) -> None:
         self._store_max_events = value
 
+    def set_platform_type(self, umo: str, platform_type: str) -> None:
+        """注册 UMO 对应的平台类型，用于生成路径中的平台目录名。"""
+        self._platform_types[umo] = platform_type
+
     def _get_lock(self, umo: str) -> asyncio.Lock:
         if umo not in self._locks:
             self._locks[umo] = asyncio.Lock()
         return self._locks[umo]
 
     def _file_path(self, umo: str) -> Path:
-        return self._base_dir / umo_to_relative_path(umo)
+        platform_type = self._platform_types.get(umo)
+        return self._base_dir / umo_to_relative_path(umo, platform_type=platform_type)
 
     def _ensure_dir(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,6 +113,32 @@ class JsonStore:
             session.events = self._trim_events(session.events)
             self._write_raw(path, session)
 
+    async def append_bot_message(
+        self,
+        umo: str,
+        content: str,
+        bot_id: str,
+        components: list[dict] | None = None,
+        raw_chain: list[dict] | None = None,
+    ) -> str:
+        """构造一条 Bot 消息事件并追加到存储，返回 event_id。"""
+        id_gen = self.get_id_generator(umo)
+        event_id = id_gen.next_message_id()
+        msg_event = MessageEvent(
+            id=event_id,
+            timestamp=int(time.time()),
+            sender_id=bot_id,
+            sender_name="AstrBot",
+            role="bot",
+            content=content,
+            outline=content,
+            message_str=content,
+            components=components or [],
+            raw_chain=raw_chain or [],
+        )
+        await self.append_event(umo, msg_event.to_dict())
+        return event_id
+
     async def update_last_tool_event(
         self, umo: str, tool_name: str, updates: dict[str, Any]
     ) -> None:
@@ -113,7 +147,6 @@ class JsonStore:
         async with lock:
             path = self._file_path(umo)
             session = self._read_raw(path)
-            # 从后往前找
             for ev in reversed(session.events):
                 if (
                     ev.get("type") == "tool"
@@ -127,7 +160,7 @@ class JsonStore:
     async def update_tool_event(
         self, umo: str, tool_id: str, updates: dict[str, Any]
     ) -> bool:
-        """Update a tool event by its exact event id."""
+        """按 event id 精确更新工具事件。"""
         lock = self._get_lock(umo)
         async with lock:
             path = self._file_path(umo)
@@ -159,6 +192,7 @@ class JsonStore:
             # 重置 ID 生成器
             if umo in self._id_generators:
                 del self._id_generators[umo]
+            self._platform_types.pop(umo, None)
 
     async def get_event_count(self, umo: str) -> int:
         """获取指定会话的事件数量。"""

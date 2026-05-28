@@ -3,6 +3,6 @@ display_name: 群聊上下文增强
 desc: 接管群聊场景下的短期上下文记录、触发判断与临时上下文注入，保留本体 agent/tool 能力。
 short_desc: 群聊上下文增强插件
 version: v1.0.0
-author: ChatContextPlus
+author: Hola
 repo: https://github.com/placeholder/astrbot_plugin_chat_context_plus
 astrbot_version: ">=4.24,<5"

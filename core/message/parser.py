@@ -86,8 +86,9 @@ def render_message_chain(chain: list) -> str:
 def extract_content(event: AstrMessageEvent) -> tuple[str, str, str, list[dict]]:
     """从事件中提取消息内容。
 
-    纯文本消息走本体 get_message_outline() 快速路径；
-    含 Reply/Image/At 等组件的消息走 render_message_chain() 自定义渲染。
+    优先走本体 get_message_outline()——插件历史中引用消息走占位符、
+    合并转发走 [合并转发消息]，都由本体 outline 渲染，保持一致性。
+    自定义渲染仅作为 fallback。
 
     Returns:
         (outline, content, message_str, components_summary)
@@ -98,15 +99,15 @@ def extract_content(event: AstrMessageEvent) -> tuple[str, str, str, list[dict]]
     except Exception:
         pass
 
-    if is_plain_text_message(event):
-        outline = ""
-        try:
-            outline = event.get_message_outline() or ""
-        except Exception:
-            pass
-        content = outline or message_str
-    else:
-        outline = ""
+    outline = ""
+    try:
+        outline = event.get_message_outline() or ""
+    except Exception:
+        pass
+
+    content = outline or message_str
+
+    if not content:
         try:
             chain = event.message_obj.message or []
         except Exception:
@@ -121,8 +122,8 @@ def extract_content(event: AstrMessageEvent) -> tuple[str, str, str, list[dict]]
 def extract_reply(event: AstrMessageEvent) -> dict | None:
     """从事件的消息链中提取 Reply 组件信息，使用自定义渲染器处理 reply.chain。
 
-    渲染后清掉原始 Reply.chain 中的 Image，阻止本体 _process_quote_message
-    再次调 VL 转述引用图片。
+    路径②（_process_quote_message）保留——被引用的图片由本体重新转述，
+    符合用户引用图片让 bot 再看一遍的预期。
     """
     try:
         chain = event.message_obj.message or []
@@ -142,8 +143,6 @@ def extract_reply(event: AstrMessageEvent) -> dict | None:
         reply_chain = getattr(comp, "chain", None) or []
         if reply_chain:
             reply_content = render_message_chain(reply_chain)
-            # 清掉原始 Reply.chain 中的 Image
-            comp.chain = [c for c in reply_chain if not isinstance(c, Comp.Image)]
         else:
             reply_content = str(
                 getattr(comp, "message_str", "") or getattr(comp, "text", "") or ""
@@ -179,6 +178,44 @@ def extract_components_summary(event: AstrMessageEvent) -> list[dict]:
         else:
             summary.append({"type": type(comp).__name__})
     return summary
+
+
+def _serialize_comp(comp: Any) -> dict[str, Any]:
+    """将单个组件序列化为 dict，处理嵌套组件列表（如 Reply.chain）。
+
+    仅处理一层：平台适配器在构造 Reply 时已将深层引用展平为纯文本，
+    不会出现嵌套 Reply 对象，无需递归。
+    """
+    try:
+        d = comp.toDict()
+    except Exception:
+        return {"type": type(comp).__name__, "data": {}}
+
+    data = d.get("data")
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, list):
+                data[key] = [
+                    item.toDict()
+                    if hasattr(item, "toDict") and not isinstance(item, dict)
+                    else item
+                    for item in value
+                ]
+    return d
+
+
+def extract_raw_chain(event: AstrMessageEvent) -> list[dict[str, Any]]:
+    """提取完整的原始消息组件链，保留图片 URL、文件路径等数据。
+
+    使用组件自带的 toDict() 序列化，格式如：
+    ``{"type": "image", "data": {"file": "file:///...", "url": "..."}}``。
+    """
+    try:
+        chain = event.message_obj.message or []
+    except Exception:
+        return []
+
+    return [_serialize_comp(comp) for comp in chain]
 
 
 def is_empty_mention(event: AstrMessageEvent) -> bool:

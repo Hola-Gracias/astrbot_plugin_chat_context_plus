@@ -45,6 +45,7 @@ async def inject_history(
     bot_id: str = "",
     injection_mode: str = "extra_user_content_parts",
     debug_logging: bool = False,
+    image_captions: dict[str, str] | None = None,
 ) -> None:
     """向 LLM 请求注入群聊历史上下文。
 
@@ -72,6 +73,7 @@ async def inject_history(
         enable_tool_history=enable_tool_history,
         session_id=session_id,
         bot_id=bot_id,
+        image_captions=image_captions,
     )
 
     # 3. 渲染 <tool_history>（如果启用）

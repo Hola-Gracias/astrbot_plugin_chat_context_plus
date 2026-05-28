@@ -90,6 +90,31 @@
       }
     }
   },
+  "image_caption": {
+    "type": "object",
+    "description": "图片持久化与缓存",
+    "items": {
+      "retention_days": {
+        "type": "int",
+        "description": "图片保留天数",
+        "hint": "超过此天数的图片会在清理时被删除",
+        "default": 7
+      },
+      "max_per_platform": {
+        "type": "int",
+        "description": "每平台最大图片数",
+        "hint": "每个平台最多保存的图片数量，超出时删除最旧的图片",
+        "default": 100
+      },
+      "caption_mode": {
+        "type": "string",
+        "description": "图片转述模式",
+        "hint": "auto-自动转述 on_reply-回复时转述 off-关闭",
+        "options": ["off", "auto", "on_reply"],
+        "default": "off"
+      }
+    }
+  },
   "debug_logging": {
     "type": "bool",
     "description": "调试日志",

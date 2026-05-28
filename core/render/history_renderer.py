@@ -12,10 +12,14 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
 from .sanitizer import sanitize
+
+# 本体 get_message_outline 对 Reply 的渲染格式: [引用消息(sender: text)] ...
+_REPLY_OUTLINE_PREFIX = re.compile(r"^\[引用消息[^\]]*\]\s*")
 
 # <history> 头部注入提示
 _HISTORY_HEADER = """以下内容是群聊历史记录，只用于理解上下文。
@@ -92,6 +96,7 @@ def render_history(
     enable_tool_history: bool,
     session_id: str = "",
     bot_id: str = "",
+    image_captions: dict[str, str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """渲染 <history> 文本。
 
@@ -184,7 +189,35 @@ def render_history(
                 )
                 content = sanitize(content)
 
+                # 图片转述：按 raw_chain 中 Image 的顺序逐一替换 [图片]
+                if image_captions:
+                    raw_chain = ev.get("raw_chain") or []
+                    for comp in raw_chain:
+                        if comp.get("type") == "image":
+                            data = comp.get("data") or {}
+                            src = data.get("url") or data.get("file") or ""
+                            caption = image_captions.get(src) if src else None
+                            replacement = f"[图片: {caption}]" if caption else "[图片]"
+                            content = content.replace("[图片]", replacement, 1)
+
+                # 引用消息：剥掉本体 outline 生成的 [引用消息(...)] 前缀
+                reply = ev.get("reply")
+                if reply:
+                    content = _REPLY_OUTLINE_PREFIX.sub("", content)
+
                 lines.append(f"['{sender_name}'|'{sender_id}'|'{time_str}']")
+                if reply:
+                    reply_sender_name = reply.get("sender_name", "未知用户")
+                    reply_sender_id = reply.get("sender_id", "???")
+                    reply_ts = reply.get("time", 0)
+                    reply_time_str = (
+                        _format_time(reply_ts) if reply_ts > 0 else "??:??:??"
+                    )
+                    reply_content = reply.get("content", "")
+                    lines.append(
+                        f"[引用消息: ['{reply_sender_name}'|'{reply_sender_id}'|'{reply_time_str}']: {reply_content}]"
+                    )
+
                 lines.append(content)
                 lines.append("---")
 

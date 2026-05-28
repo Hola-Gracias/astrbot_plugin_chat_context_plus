@@ -22,18 +22,22 @@ from typing import Any
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.provider import LLMResponse, ProviderRequest
+from astrbot.api.provider import LLMResponse, Provider, ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
 
+from .core.caption.captioner import ImageCaptioner
 from .core.compat.injector import inject_history
 from .core.message.parser import (
     extract_content,
+    extract_raw_chain,
     extract_reply,
     is_ccp_command,
     is_empty_mention,
 )
+from .core.render.send_message_renderer import render_send_message_content
+from .core.storage.image_store import ImageStore
 from .core.storage.json_store import JsonStore
 from .core.storage.schema import MessageEvent, ToolEvent
 from .core.trigger.rule_trigger import RuleTrigger
@@ -59,6 +63,11 @@ class ChatContextPlusPlugin(Star):
         self.tool_result_max_chars = 1000
         self.debug_logging = False
         self.injection_mode = "extra_user_content_parts"
+        self.image_store: ImageStore | None = None
+        self.image_retention_days = 7
+        self.image_max_per_platform = 100
+        self.caption_mode = "off"
+        self.captioner: ImageCaptioner | None = None
 
     async def initialize(self) -> None:
         """插件初始化：读取配置、创建存储和触发器。"""
@@ -104,13 +113,31 @@ class ChatContextPlusPlugin(Star):
         else:
             self.trigger.update_config(**trigger_kwargs)
 
+        # 图片存储
+        ic = self.config.get("image_caption", {})
+        self.image_retention_days = ic.get("retention_days", 7)
+        self.image_max_per_platform = ic.get("max_per_platform", 100)
+        if self.image_store is None:
+            self.image_store = ImageStore(
+                base_dir=data_dir,
+                retention_days=self.image_retention_days,
+                max_per_platform=self.image_max_per_platform,
+            )
+        else:
+            self.image_store.retention_days = self.image_retention_days
+            self.image_store.max_per_platform = self.image_max_per_platform
+
+        self.caption_mode = ic.get("caption_mode", "off")
+        if self.captioner is None:
+            self.captioner = ImageCaptioner(self.context, self.image_store)
+
     def _is_enabled(self) -> bool:
         return self.enabled
 
     def _resolve_send_message_target_umo(
         self, event: AstrMessageEvent, tool_args: dict | None
     ) -> str | None:
-        """Resolve send_message_to_user target session to UMO if it is a group."""
+        """将 send_message_to_user 的目标会话解析为 UMO（仅群聊）。"""
         current_session = event.unified_msg_origin
         session_arg = (
             tool_args.get("session")
@@ -143,78 +170,6 @@ class ChatContextPlusPlugin(Star):
             return None
         return str(target_session)
 
-    def _render_send_message_content(
-        self, tool_args: dict | None
-    ) -> tuple[str, list[dict]]:
-        """Render send_message_to_user message args into stored bot history text."""
-        if not isinstance(tool_args, dict):
-            return "", []
-
-        messages = tool_args.get("messages")
-        if not isinstance(messages, list):
-            return "", []
-
-        parts: list[str] = []
-        components: list[dict] = []
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-
-            msg_type = str(msg.get("type", "")).lower()
-            if not msg_type:
-                continue
-            components.append({"type": msg_type})
-
-            if msg_type == "plain":
-                text = str(msg.get("text", "")).strip()
-                if text:
-                    parts.append(text)
-            elif msg_type == "image":
-                parts.append("[图片]")
-            elif msg_type == "record":
-                parts.append("[语音]")
-            elif msg_type == "video":
-                parts.append("[视频]")
-            elif msg_type == "file":
-                parts.append("[文件]")
-            elif msg_type == "mention_user":
-                mention_user_id = str(msg.get("mention_user_id", "")).strip()
-                parts.append(f"[@{mention_user_id}]" if mention_user_id else "[@]")
-            else:
-                parts.append("[未知消息组件]")
-
-        return " ".join(parts), components
-
-    async def _append_bot_message(
-        self,
-        umo: str,
-        event: AstrMessageEvent,
-        content: str,
-        components: list[dict] | None = None,
-    ) -> str | None:
-        """Append a bot message event to the target UMO history."""
-        if self.store is None or not content:
-            return None
-
-        id_gen = self.store.get_id_generator(umo)
-        event_id = id_gen.next_message_id()
-        bot_id = event.get_self_id() or "astrbot"
-
-        msg_event = MessageEvent(
-            id=event_id,
-            timestamp=int(time.time()),
-            sender_id=bot_id,
-            sender_name="AstrBot",
-            role="bot",
-            content=content,
-            outline=content,
-            message_str=content,
-            components=components or [],
-        )
-
-        await self.store.append_event(umo, msg_event.to_dict())
-        return event_id
-
     async def _record_send_message_to_user(
         self,
         event: AstrMessageEvent,
@@ -222,7 +177,7 @@ class ChatContextPlusPlugin(Star):
         status: str,
         result_text: str,
     ) -> None:
-        """Record successful send_message_to_user calls as bot group history."""
+        """将成功的 send_message_to_user 调用记录为 Bot 群聊历史。"""
         if status != "success" or result_text.strip().lower().startswith("error:"):
             return
 
@@ -230,12 +185,16 @@ class ChatContextPlusPlugin(Star):
         if not target_umo:
             return
 
-        content, components = self._render_send_message_content(tool_args)
+        content, components = render_send_message_content(tool_args)
         if not content:
             return
 
-        event_id = await self._append_bot_message(
-            target_umo, event, content, components
+        # 确保目标 UMO 也有平台类型映射
+        self.store.set_platform_type(target_umo, event.get_platform_name())
+
+        bot_id = event.get_self_id() or "astrbot"
+        event_id = await self.store.append_bot_message(
+            target_umo, content, bot_id, components
         )
         if self.debug_logging and event_id:
             logger.debug(
@@ -259,6 +218,21 @@ class ChatContextPlusPlugin(Star):
             logger.warning(f"[ChatContextPlus] 获取当前会话失败: {e}")
             return None
 
+    async def _get_image_caption_provider(self, umo: str) -> Provider | None:
+        """获取当前会话配置的默认图片转述模型 Provider。"""
+        try:
+            cfg = self.context.get_config(umo)
+            provider_settings = cfg.get("provider_settings", {})
+            prov_id: str = provider_settings.get(
+                "default_image_caption_provider_id", ""
+            )
+            if not prov_id:
+                return None
+            return self.context.get_provider_by_id(prov_id)
+        except Exception as e:
+            logger.warning(f"[ChatContextPlus] 获取图片转述模型失败: {e}")
+            return None
+
     # ─── 群聊消息 handler ───
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
@@ -268,6 +242,10 @@ class ChatContextPlusPlugin(Star):
             return
 
         umo = event.unified_msg_origin
+
+        # 注册平台类型，确保路径中平台目录使用 platform_meta.name（如 aiocqhttp）
+        if self.store is not None:
+            self.store.set_platform_type(umo, event.get_platform_name())
 
         if is_ccp_command(event):
             event.set_extra("ccp_command", True)
@@ -289,8 +267,42 @@ class ChatContextPlusPlugin(Star):
             outline=outline,
             message_str=message_str,
             components=components,
+            raw_chain=extract_raw_chain(event),
             reply=reply,
         )
+
+        # 图片持久化：遍历原始消息链中的 Image 组件
+        if self.image_store is not None:
+            try:
+                msg_chain = event.message_obj.message or []
+            except Exception:
+                msg_chain = []
+            for comp in msg_chain:
+                if isinstance(comp, Comp.Image):
+                    source_id = comp.url or comp.file or ""
+                    if source_id:
+                        try:
+                            await self.image_store.save_image(
+                                platform_type=event.get_platform_name(),
+                                image_comp=comp,
+                                source_id=source_id,
+                            )
+                        except Exception as e:
+                            if self.debug_logging:
+                                logger.debug(f"[ChatContextPlus] 保存图片失败: {e}")
+
+        # auto 模式：扫描历史窗口内所有图片，按顺序转述未缓存的
+        if self.caption_mode == "auto" and self.captioner is not None:
+            try:
+                existing_events = await self.store.get_events(umo)
+                await self.captioner.ensure_events_captioned(
+                    events=existing_events,
+                    umo=umo,
+                    platform_type=event.get_platform_name(),
+                )
+            except Exception as e:
+                if self.debug_logging:
+                    logger.debug(f"[ChatContextPlus] auto 转述失败: {e}")
 
         # 立即写入 JSON
         await self.store.append_event(umo, msg_event.to_dict())
@@ -303,39 +315,27 @@ class ChatContextPlusPlugin(Star):
         should_trigger = self.trigger.should_trigger(event)
 
         if should_trigger:
-            # 普通群消息由插件规则触发时，本体不会自动标记为 @/唤醒词消息。
             event.is_wake = True
             event.is_at_or_wake_command = True
 
-            # 插件接管 LLM 请求构建。
-            # - image_urls=[] 阻止本体在 build_main_agent 中自动提取消息图片并调用
-            #   _ensure_img_caption 转述。
-            # - conversation 确保本体能正常加载当前会话的人格 system prompt。
-            conversation = await self._get_current_conversation(event)
-
+            # 纯 @（空消息）补全提示词
             if is_empty_mention(event):
-                prompt = (
-                    "用户在群聊中 @ 了你，但没有输入文字。"
-                    "请先结合最近群聊历史自然回应；如果上下文不足再简短询问对方有什么事。"
-                    "不要提到这是一条系统补全文本。"
+                conversation = await self._get_current_conversation(event)
+                req = event.request_llm(
+                    prompt=(
+                        "用户在群聊中 @ 了你，但没有输入文字。可能是想让你回复某条消息或忘记输入内容。"
+                        "请先结合最近群聊历史判断并自然回应。如果上下文不足再简短询问对方有什么事。"
+                        "不要提到这是一条系统补全文本。"
+                    ),
+                    conversation=conversation,
                 )
-            else:
-                prompt = content or message_str
-
-            req = event.request_llm(
-                prompt=prompt,
-                image_urls=[],
-                conversation=conversation,
-            )
-            event.set_extra("provider_request", req)
+                event.set_extra("provider_request", req)
 
         event.should_call_llm(not should_trigger)
 
         if should_trigger:
             event.set_extra("ccp_triggered", True)
             logger.debug(f"[ChatContextPlus] 触发 LLM: {umo} event={event_id}")
-
-        # 不 stop_event
 
     # ─── LLM 请求 hook ───
 
@@ -363,6 +363,19 @@ class ChatContextPlusPlugin(Star):
         session_id = event.get_session_id()
         bot_id = event.get_self_id()
 
+        # 图片转述收集
+        image_captions: dict[str, str] | None = None
+        if self.caption_mode != "off" and self.captioner is not None:
+            platform_type = event.get_platform_name()
+            if self.caption_mode == "on_reply":
+                image_captions = await self.captioner.ensure_events_captioned(
+                    events=events, umo=umo, platform_type=platform_type
+                )
+            else:
+                image_captions = await self.captioner.collect_captions_from_events(
+                    events=events, platform_type=platform_type
+                )
+
         await inject_history(
             req=req,
             events=events,
@@ -375,6 +388,7 @@ class ChatContextPlusPlugin(Star):
             bot_id=bot_id,
             injection_mode=self.injection_mode,
             debug_logging=self.debug_logging,
+            image_captions=image_captions,
         )
 
     # ─── 工具调用 hooks ───
@@ -441,7 +455,6 @@ class ChatContextPlusPlugin(Star):
         result_text = ""
         if tool_result is not None:
             try:
-                # CallToolResult 有 content 属性
                 if hasattr(tool_result, "content") and tool_result.content:
                     parts = []
                     for block in tool_result.content:
@@ -544,7 +557,19 @@ class ChatContextPlusPlugin(Star):
         if not bot_content:
             bot_content = "[Bot 回复内容无法提取]"
 
-        await self._append_bot_message(umo, event, bot_content)
+        # 提取 Bot 回复的原始组件链
+        bot_raw_chain: list[dict] = []
+        if result and hasattr(result, "chain") and result.chain:
+            for comp in result.chain:
+                try:
+                    bot_raw_chain.append(comp.toDict())
+                except Exception:
+                    bot_raw_chain.append({"type": type(comp).__name__, "data": {}})
+
+        bot_id = event.get_self_id() or "astrbot"
+        await self.store.append_bot_message(
+            umo, bot_content, bot_id, raw_chain=bot_raw_chain
+        )
 
     # ─── LLM 响应 fallback hook ───
 
